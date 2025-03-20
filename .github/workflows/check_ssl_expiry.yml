@@ -1,0 +1,103 @@
+name: SSL Certificate Expiry Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Domain name to check SSL expiry"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write  # Needed for creating GitHub Issues
+
+jobs:
+  check-ssl:
+    name: Check SSL Expiration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check SSL Expiry using OpenSSL
+        id: openssl_check
+        run: |
+          echo "Checking SSL expiration using OpenSSL..."
+          EXPIRY_DATE=$(echo | openssl s_client -servername ${{ inputs.domain }} -connect ${{ inputs.domain }}:443 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)
+          if [ -z "$EXPIRY_DATE" ]; then
+            echo "::error::Failed to retrieve SSL certificate expiry date for ${{ inputs.domain }}"
+            exit 1
+          fi
+          echo "SSL Expiry Date: $EXPIRY_DATE"
+          echo "EXPIRY_DATE=$EXPIRY_DATE" >> $GITHUB_ENV
+
+      - name: Calculate Remaining Days
+        id: days_remaining
+        run: |
+          echo "Calculating remaining days..."
+          EXPIRY_TIMESTAMP=$(date -d "$EXPIRY_DATE" +%s)
+          CURRENT_TIMESTAMP=$(date +%s)
+          DAYS_LEFT=$(( (EXPIRY_TIMESTAMP - CURRENT_TIMESTAMP) / 86400 ))
+          echo "SSL certificate expires in $DAYS_LEFT days."
+          echo "DAYS_LEFT=$DAYS_LEFT" >> $GITHUB_ENV
+
+          if [ "$DAYS_LEFT" -lt 30 ]; then
+            echo "::warning::SSL certificate for ${{ inputs.domain }} is expiring soon: $DAYS_LEFT days left."
+          fi
+
+          if [ "$DAYS_LEFT" -lt 10 ]; then
+            echo "::error::SSL certificate for ${{ inputs.domain }} is expiring in $DAYS_LEFT days! Immediate action required."
+            exit 1
+          fi
+
+      - name: Check SSL Expiry using nmap
+        run: |
+          echo "Checking SSL expiration using nmap..."
+          sudo apt-get update && sudo apt-get install -y nmap
+          nmap --script ssl-cert -p 443 ${{ inputs.domain }} | grep "Not valid after"
+        continue-on-error: true
+
+      - name: Check SSL Expiry using curl
+        run: |
+          echo "Checking SSL expiration using curl..."
+          curl -vI --silent https://${{ inputs.domain }} 2>&1 | grep -i "expire"
+        continue-on-error: true
+
+      - name: Create GitHub Issue if SSL Expires Soon
+        if: env.DAYS_LEFT != '' && env.DAYS_LEFT < 30
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueTitle = `🚨 SSL Expiry Alert: ${{ inputs.domain }}`;
+            const issueBody = `### SSL Certificate Expiry Warning
+            The SSL certificate for **${{ inputs.domain }}** is expiring in **${{ env.DAYS_LEFT }} days**.
+            
+            Please renew it as soon as possible to avoid security risks.
+
+            - **Checked using OpenSSL, nmap, and curl**
+            - **Run Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+            > **Action Required:** Please schedule a renewal.
+
+            _Automated GitHub Actions Monitoring_ 🚀`;
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open'
+            });
+
+            const existingIssue = issues.data.find(issue => issue.title === issueTitle);
+
+            if (!existingIssue) {
+              github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ["ssl", "security", "urgent"]
+              });
+            } else {
+              console.log("Issue already exists. No new issue created.");
+            }
