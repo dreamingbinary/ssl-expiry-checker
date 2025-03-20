@@ -15,10 +15,16 @@ permissions:
 
 jobs:
   check-ssl:
-    name: Check SSL Expiration
+    name: Check SSL for ${{ inputs.domain }}
     runs-on: ubuntu-latest
-
+    outputs:
+      domain: ${{ steps.store-domain.outputs.domain }}
+    
     steps:
+      - name: Store Domain as Output
+        id: store-domain
+        run: echo "domain=${{ inputs.domain }}" >> $GITHUB_ENV
+        
       - name: Check SSL Expiry using OpenSSL
         id: openssl_check
         run: |
@@ -101,3 +107,10 @@ jobs:
             } else {
               console.log("Issue already exists. No new issue created.");
             }
+            
+      - name: Add Summary to Workflow
+        run: |
+          echo "## SSL Certificate Check Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Domain Checked:** ${{ inputs.domain }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Run by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Started at:** $(date)" >> $GITHUB_STEP_SUMMARY
